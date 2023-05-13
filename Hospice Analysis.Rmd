@@ -1,0 +1,135 @@
+---
+title: "Hospice Analysis"
+output:
+  pdf_document: default
+  html_document: default
+date: "2023-04-21"
+---
+The first step is loading the libraries, the data, and examine the variables.  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Users/frank/OneDrive/Desktop/Applied Multivariate Analysis for Social Scientists/hospice_care_current_data")
+library(tidyverse)
+library(dplyr)
+library (maps)
+library(mapproj)
+library(ggplot2)
+library(reshape2)
+library(tidyr)
+library(readxl)
+library(cluster)
+library(factoextra)
+general_info <- read.csv("Hospice_General-Information_Feb2023.csv")
+# The general info file includes information on CMS certification number, facility name, address line 1, address line 2, city, state, zip code, county name, phone number, CMS region, ownership status, and certification date.
+hospice_national <- read.csv("Hospice_National_Feb2023.csv")
+# Includes certification number, measure code, measure name, score, footnote, and measure date range. The CCN reads as "Nation" and thus this is just an overall score for the entire country. It might be the average score which might be helpful to reference back to. 
+hospice_provider <- read.csv("Hospice_Provider_Feb2023.csv")
+# CMS certification number, facility name (repeated for each facility), address line 1, address line 2, city, state, zip code, county name, phone number, CMS region, measure code, measure name, score, footnote, measure date range
+hospice_state <- read.csv("Hospice_State_Feb2023.csv")
+# State, measure code, measure name, score, footnote, measure date range
+hospice_zip <- read.csv("Hospice_Zip_Feb2023.csv")
+# State, CMS certification number, zip code
+national_survey <- read.csv("National_CAHPS_Hospice_Survey_Data_Feb2023.csv")
+# Measure code, measure name, score, footnote, date
+provider_survey <- read.csv("Provider_CAHPS_Hospice_Survey_Data_Feb2023.csv")
+# certification number, facility name, address line 1, address line 2, city, state, zip code, county name, phone number, CMS region, measure code, measure name, score, star rating, footnote, date 
+state_survey <- read.csv("State_CAHPS_Hospice_Survey_Data_Feb2023.csv")
+# state, measure code, measure name, score, footnote, date
+pac_puf <- read.csv("PACPUF_Provider_Table_2020.csv")
+# This includes the PAC PUF data for hospices 
+```
+
+Time to make some maps to see how local these problems are. First we'll start off with hospice visits in the last days of life. 
+```{r}
+states_map <- map_data("state")
+states_map$region <- factor(states_map$region)
+last_days <- hospice_state[hospice_state$Measure.Name == "Hospice Visits in the Last Days of Life",]
+last_days$State <- state.name[match(last_days$State,state.abb)]
+last_days$State <- tolower(last_days$State)
+last_days$Score = as.numeric(as.character(last_days$Score)) 
+ld_map <- merge(states_map, last_days, by.x = "region", by.y = "State")
+ld_map <- arrange(ld_map, group, order)
+ggplot(ld_map, aes(x=long, y = lat, group = group, fill = Score)) + geom_polygon(colour = "black") + coord_map("polyconic")
+# https://r-graphics.org/recipe-miscgraph-choropleth
+```
+
+Then we'll reshape and merge the relevant datasets together in order to create something we can work with. We'll drop variables we don't need and rename the data in order to understand the data. Finally we'll drop variables or change them before we perform cluster analysis. 
+```{r}
+
+#reshape_data <- reshape(hospice_provider, idvar=c("Facility.Name","Phone.Number","CMS.Certification.Number..CCN.","Zip.Code", "Address.Line.1","Address.Line.2","City","State","County.Name","CMS.Region"), timevar=c("Measure.Name","Measure.Code"), direction="wide")
+
+# Maybe I should try the below formula with reshape or pivot_wider using only those variables???
+# For whatever reason, I can't include footnote or Measure.Date.Range on the LHS because otherwise that messes up the data. Plus both Measure.Name and Measure.Code need to be on the RHS. 
+wide_provider_measures <- dcast(hospice_provider, Facility.Name + Phone.Number + CMS.Certification.Number..CCN. + Zip.Code + Address.Line.1 + Address.Line.2 + City + State + County.Name + CMS.Region ~ Measure.Name + Measure.Code, value.var="Score")
+
+wide_survey <- dcast(provider_survey, CMS.Certification.Number..CCN. + Facility.Name + Address.Line.1 + Address.Line.2 + City + State + Zip.Code + County.Name + Phone.Number + CMS.Region ~ Measure.Name + Measure.Code, value.var="Score")
+
+hospice_merge <- merge(wide_provider_measures, wide_survey, by=c("CMS.Certification.Number..CCN.","Phone.Number","Zip.Code","Address.Line.1","Address.Line.2","City","State","County.Name","CMS.Region","Facility.Name"))
+
+hospice_pac <- pac_puf[pac_puf$SRVC_CTGRY == "HOS",]
+hospice_pac <- hospice_pac %>% rename("CMS.Certification.Number..CCN." = "PRVDR_ID")
+
+final_merge <- merge(hospice_merge, hospice_pac, by="CMS.Certification.Number..CCN.")
+final_merge <- final_merge[,!names(final_merge) %in% c("YEAR","YEAR_TYPE","SMRY_C TGRY","SRVC_CTGRY","PRVDR_CITY","STATE","PRVDR_ZIP","PRVDR_NAME","Phone.Number","Summary Category","Family caregiver survey rating_SUMMARY_STAR_RATING","Address.Line.1")]
+
+puc_dict <- read_xlsx("key.xlsx")
+puc_dict <- puc_dict[,!names(puc_dict) %in% c("VARIABLE ORDER","HH","HOSPICE","SNF","IRF","LTCH","DESCRIPTION","Hospice")]    
+colnames(final_merge) <- dplyr::recode(colnames(final_merge),!!!setNames(as.character(puc_dict$"VARIABLE LABEL"), puc_dict$"VARIABLE NAME"))
+
+final_merge <- final_merge[, colSums(is.na(final_merge)) != nrow(final_merge)]
+# Dropping all NA columns drops the columns from 233 variables to 160 variables 
+
+#Above code is to turn all "Not Available" and "*" to NA
+
+# Should I delete all rows with any missing data in them? 
+# Should I turn yes and no into a binary variable?
+# Columns to potentially drop further: Summary Category, Family caregiver survey rating_SUMMARY_STAR_RATING, Phone Number, and Address Line 1
+# What does the denominator mean and what should I do with them?
+# Why are there stars for some of this data? Should I turn that to NA?
+# I need to include income by zip code!!!
+
+# https://stackoverflow.com/questions/59314285/selectively-rename-r-data-frame-column-names-using-a-key-value-pair-dictionary 
+# https://cran.r-project.org/web/packages/data.table/vignettes/datatable-reshape.html
+```
+
+
+
+Now we'll do cluster analysis in order to find groups of hospices and create profiles for each of them. 
+```{r}
+AMA_data <- final_merge
+colvar0 <- apply(AMA_data,2,function(x) var(x,na.rm=T)==0)
+colvar0
+AMA_data <- AMA_data[,!names(AMA_data) %in% c("Percent of Beneficiaries with a Primary Diagnosis of Skin Ulcer/Burns","Percent of Beneficiaries with a Primary Diagnosis of Aftercare","Hospice served at least 1 patient enrolled in Medicare Advantage during one year_Bene_MA_Pct","Hospice served at least 1 patient with both Medicare and Medicaid coverage during one year_Bene_Dual_Pct","Per-beneficiary spending (U.S. dollars $)_H_012_07_OBSERVED","Provided Routine Home Care and other levels of care_Provided_Home_Care_and_other","Provided Routine Home Care only_Provided_Home_Care_only","_EMO_REL_MBV","Summary Category")]
+AMA_data[is.na(AMA_data)] <- 0
+AMA_data <- AMA_data[c(-1,-2,-3,-4,-5,-6,-7)]
+AMA_data <- AMA_data %>% mutate_if(is.character,as.numeric)
+
+
+distance_matrix <- daisy(AMA_data, stand=TRUE)
+ag.clust <- agnes(AMA_data, stand=TRUE, method="ward")
+summary(ag.clust)
+#Agglomerative coefficient:  0.9916902. This is on a scale to 1 right? Yes zero to 1 and it's okay its so high. 
+plot(ag.clust)
+# How to do it from the dendogram with so many observations? It looks like 9 if I do it a little below 400.
+rect.hclust(ag.clust,k=9, border="red")
+fit <- cutree(ag.clust, k=9)
+
+is.infinite(AMA_data)
+fviz_cluster(list(data=AMA_data, cluster=fit))
+
+all(is.finite(AMA_data))
+
+fviz_nbclust(AMA_data, kmeans, method="silhouette")
+
+
+# I use to get the error message that it cannot rescale a constant/zero column to unit variance and after dropping columns that were all constants and replacing NAs with zeroes, I now get either Error in svd(x, nu = 0, nv = k) : infinite or missing values in 'x' or Error in do_one(nmeth) : NA/NaN/Inf in foreign function call (arg 1)
+#Agglomerative coefficient:  0.9916902. This is on a scale to 1 right?
+# How to do it from the dendogram with so many observations? It looks like 9 if I do it a little below 400.
+# The problem columns are Percent of Beneficiaries with a Primary Diagnosis of Skin Ulcer/Burns, Percent of Beneficiaries with a Primary Diagnosis of Aftercare
+# Once again have the rescale a constant/zero column to unit variance error 
+# If you can't see the dendogram for HCA go stratight to PAM. Fuzzy is too complex for this many observations. 
+# Poverty and income may be overbalanced BUT poverty and health are okay like UN development indices. But it also depends on how many variables you have for the other dimensions. Maybe I really need to do factor analysis. Do a categorical factor analysis. 1
+
+
+```
+
